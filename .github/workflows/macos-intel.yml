@@ -1,0 +1,168 @@
+name: macOS Intel build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-common:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 9.3.6 branch with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build common desktop payload
+        working-directory: build
+        env:
+          PRODUCT_VERSION: "9.3.6"
+          BUILD_NUMBER: "intel.1"
+          COMPANY_NAME: "Euro-Office"
+          PRODUCT_NAME: "Euro-Office"
+        run: |
+          set -euo pipefail
+          docker buildx bake desktop-common \
+            --set '*.context=..' \
+            --set desktop-common.output=type=tar,dest=./common.tar
+
+      - name: Upload common payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-payload
+          path: build/common.tar
+          compression-level: 0
+
+  build-macos-intel:
+    runs-on: macos-15-intel
+    needs: build-common
+    env:
+      REPO: ${{ github.workspace }}
+      EO_3RDPARTY: /Users/runner/eo-3rdparty-intel
+      STAGE: ${{ github.workspace }}/macos-stage
+      SDK_BUILD_DIR: ${{ github.workspace }}/build-mac-sdk-intel
+      CCACHE_DIR: /Users/runner/.ccache
+      DMG_PATH: ${{ github.workspace }}/build/macos/out/Euro-Office-DesktopEditors-9.3.6-intel.1-macos-x86_64.dmg
+    steps:
+      - name: Checkout 9.3.6 branch with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify Intel runner
+        run: |
+          set -euxo pipefail
+          uname -a
+          uname -m
+          test "$(uname -m)" = "x86_64"
+          xcodebuild -version
+
+      - name: Apply macOS Intel compatibility patches
+        run: python3 build/macos/patch-intel.py
+
+      - name: Install build prerequisites
+        run: brew install ninja autoconf automake libtool pkg-config ccache jq node
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+
+      - name: Download common payload
+        uses: actions/download-artifact@v4
+        with:
+          name: common-payload
+          path: .
+
+      - name: Extract common payload
+        run: |
+          set -euo pipefail
+          mkdir -p build/deploy/common
+          tar -xf common.tar -C build/deploy/common
+          test -f build/deploy/common/index.html
+
+      - name: Restore third-party dependency cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.EO_3RDPARTY }}
+          key: macos-intel-3rdparty-${{ hashFiles('core/Common/3dParty/**/nc-build.py', 'build/macos/patch-intel.py') }}
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: macos-intel-ccache-${{ hashFiles('core/**/CMakeLists.txt', 'desktop-sdk/**/CMakeLists.txt', 'build/macos/patch-intel.py') }}
+          restore-keys: |
+            macos-intel-ccache-
+
+      - name: Build desktop-sdk for x86_64
+        run: |
+          set -euo pipefail
+          cmake -S "${REPO}/desktop-sdk/ChromiumBasedEditors/lib" -B "${SDK_BUILD_DIR}" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DBUILD_DESKTOP=1 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-osx \
+            -DVCPKG_MANIFEST_MODE=ON \
+            -DVCPKG_MANIFEST_DIR="${REPO}/core" \
+            -DEO_CORE_3RD_PARTY_DIR="${EO_3RDPARTY}" \
+            -DEO_CORE_OUTPUT_DIR="${STAGE}/converter"
+          cmake --build "${SDK_BUILD_DIR}" --parallel 4
+
+      - name: Stage the desktop build
+        run: |
+          ./build/macos/stage.sh \
+            --stage-dir "${STAGE}" \
+            --3rdparty-dir "${EO_3RDPARTY}"
+
+      - name: Build Xcode app for x86_64
+        run: |
+          set -euo pipefail
+          mkdir -p build/macos/out
+          xcodebuild \
+            -project desktop-apps/macos/Euro-Office.xcodeproj \
+            -scheme Euro-Office-arm \
+            -configuration Release \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=YES \
+            EXCLUDED_ARCHS= \
+            CODE_SIGNING_ALLOWED=NO \
+            EO_MAC_STAGE_DIR="${STAGE}" \
+            CONFIGURATION_BUILD_DIR="${REPO}/build/macos/out" \
+            PRODUCT_NAME="Euro-Office" \
+            PRODUCT_BUNDLE_IDENTIFIER="local.leinadsoft.euro-office-intel" \
+            build
+
+      - name: Verify app architecture
+        run: |
+          set -euo pipefail
+          APP="build/macos/out/Euro-Office.app"
+          test -d "$APP"
+          BIN="$APP/Contents/MacOS/Euro-Office"
+          test -x "$BIN"
+          file "$BIN"
+          lipo -info "$BIN"
+          file "$BIN" | grep -q x86_64
+
+      - name: Build DMG
+        run: |
+          ./build/macos/make-dmg.sh \
+            --app "build/macos/out/Euro-Office.app" \
+            --output "$DMG_PATH" \
+            --title "Euro-Office Intel"
+
+      - name: Upload Intel DMG and app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel-x86_64
+          path: |
+            build/macos/out/Euro-Office-DesktopEditors-9.3.6-intel.1-macos-x86_64.dmg
+            build/macos/out/Euro-Office.app
+          retention-days: 7
