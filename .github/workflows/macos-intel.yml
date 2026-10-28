@@ -2,6 +2,12 @@ name: macOS Intel build
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - macos-intel
+    paths:
+      - '.github/workflows/macos-intel.yml'
+      - 'build/macos/**'
 
 permissions:
   contents: read
