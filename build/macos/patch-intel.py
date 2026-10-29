@@ -25,11 +25,12 @@ replace_required(
 )
 
 # Dependencies whose macOS implementation is architecture-neutral/native.
+# zlib-ng is intentionally not listed: it is not present in the core revision
+# pinned by DesktopEditors 9.3.6.
 for rel in (
     "core/Common/3dParty/openssl/nc-build.py",
     "core/Common/3dParty/icu/nc-build.py",
     "core/Common/3dParty/qt/nc-build.py",
-    "core/Common/3dParty/zlib-ng/nc-build.py",
     "core/Common/3dParty/openssl-hash/nc-build.py",
 ):
     replace_required(rel, "nc.is_apple_silicon()", "nc.is_macos()")
