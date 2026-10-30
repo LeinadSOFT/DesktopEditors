@@ -4,8 +4,7 @@ import argparse
 import importlib.util
 import json
 import plistlib
-import re
-import subprocess
+import struct
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('resources', Path(__file__).resolve().parents[1] / 'nextcloud-intel/adapt-resources.py')
@@ -18,18 +17,63 @@ def version(value):
     return (parts + (0, 0, 0))[:3]
 
 
-def minimums(output):
-    result = []
-    for block in re.split(r'Load command \d+', output):
-        if 'cmd LC_BUILD_VERSION' in block:
-            found = re.search(r'^\s*minos\s+([\d.]+)', block, re.M)
-        elif 'cmd LC_VERSION_MIN_MACOSX' in block:
-            found = re.search(r'^\s*version\s+([\d.]+)', block, re.M)
-        else:
-            continue
-        if found:
-            result.append(found[1])
-    return result
+def binary_minimums(path, cpu=0x01000007):
+    """Read deployment load commands from the requested Mach-O slice."""
+    with path.open('rb') as f:
+        size = path.stat().st_size
+        header = f.read(8)
+        if len(header) != 8:
+            raise ValueError(f'Truncated header: {path}')
+        offset, limit = 0, size
+        if header[:4] in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'):
+            count = struct.unpack('>I', header[4:])[0]
+            wide = header[3] == 0xbf
+            stride = 32 if wide else 20
+            matches = []
+            for _ in range(count):
+                entry = f.read(stride)
+                if len(entry) != stride:
+                    raise ValueError(f'Truncated fat header: {path}')
+                arch = struct.unpack('>I', entry[:4])[0]
+                start, length = struct.unpack('>QQ' if wide else '>II', entry[8:24] if wide else entry[8:16])
+                if arch == cpu:
+                    matches.append((start, length))
+            if len(matches) != 1:
+                raise ValueError(f'Expected exactly one target architecture: {path}')
+            offset, length = matches[0]
+            limit = offset + length
+            if offset < 8 + count * stride or limit > size:
+                raise ValueError(f'Invalid architecture bounds: {path}')
+        f.seek(offset)
+        header = f.read(32)
+        if header[:4] != b'\xcf\xfa\xed\xfe' or len(header) != 32:
+            raise ValueError(f'Expected little-endian 64-bit Mach-O: {path}')
+        arch, _, _, ncmds, command_bytes = struct.unpack('<IIIII', header[4:24])
+        if arch != cpu or offset + 32 + command_bytes > limit:
+            raise ValueError(f'Invalid Mach-O header: {path}')
+        end = offset + 32 + command_bytes
+        targets = []
+        for _ in range(ncmds):
+            position = f.tell()
+            raw = f.read(8)
+            if len(raw) != 8:
+                raise ValueError(f'Truncated load command: {path}')
+            cmd, length = struct.unpack('<II', raw)
+            if length < 8 or position + length > end:
+                raise ValueError(f'Invalid load-command bounds: {path}')
+            if cmd in (0x24, 0x32):
+                if length < (16 if cmd == 0x24 else 24):
+                    raise ValueError(f'Truncated deployment command: {path}')
+                if cmd == 0x32:
+                    platform = struct.unpack('<I', f.read(4))[0]
+                    if platform != 1:
+                        raise ValueError(f'Expected macOS platform, found {platform}: {path}')
+                encoded = struct.unpack('<I', f.read(4))[0]
+                targets.append(f'{encoded >> 16}.{(encoded >> 8) & 255}.{encoded & 255}')
+            f.seek(position + length)
+        if f.tell() != end:
+            raise ValueError(f'Load-command count/size mismatch: {path}')
+        return targets
 
 
 def report(app):
@@ -43,9 +87,7 @@ def report(app):
             continue
         if 0x01000007 not in arch:
             raise ValueError(f'No x86_64 slice: {p}')
-        output = subprocess.run(['otool', '-arch', 'x86_64', '-l', str(p)],
-                                text=True, capture_output=True, check=True).stdout
-        targets = minimums(output)
+        targets = binary_minimums(p)
         if not targets:
             raise ValueError(f'Missing deployment load command: {p}')
         files.append({'path': str(p.relative_to(app)), 'minimum_macos': max(targets, key=version)})

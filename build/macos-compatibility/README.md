@@ -1,8 +1,8 @@
 # Intel macOS deployment inspection
 
-`check.py <app> <report.json>` runs on macOS with Xcode command-line tools.
+`check.py <app> <report.json>` uses Python's binary-file reader.
 It checks each regular Mach-O file has an x86_64 slice, reads that slice's
-LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX with `otool`, and compares the
+LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX directly from the Mach-O headers, and compares the
 maximum declared deployment minimum with Monterey 12, Sequoia 15 and Tahoe 26.
 It also includes the outer bundle's LSMinimumSystemVersion in that maximum.
 Missing architecture or deployment metadata fails inspection.
