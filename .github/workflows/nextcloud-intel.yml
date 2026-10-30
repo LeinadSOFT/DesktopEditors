@@ -49,7 +49,9 @@ jobs:
           ditto "$RUNNER_TEMP/intel-mount/Euro-Office.app" "$APP"
           python3 build/nextcloud-intel/adapt-resources.py \
             "$RUNNER_TEMP/nextcloud-mount/Nextcloud Office.app" "$APP"
-          lipo -verify_arch x86_64 "$APP/Contents/MacOS/Euro-Office"
+          lipo "$APP/Contents/MacOS/Euro-Office" -verify_arch x86_64
+          python3 build/macos-compatibility/check.py "$APP" out/macos-compatibility.json
+          cat out/macos-compatibility.json >> "$GITHUB_STEP_SUMMARY"
           # Only resources changed. Preserve the existing nested code signatures
           # and re-sign the outer bundle with its original entitlements/flags.
           codesign --force --sign - --timestamp=none \
