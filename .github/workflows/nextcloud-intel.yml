@@ -1,0 +1,70 @@
+name: Nextcloud Office Intel adaptation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos-intel]
+    paths:
+      - '.github/workflows/nextcloud-intel.yml'
+      - 'build/nextcloud-intel/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  adapt-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download successful Intel build
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-intel-x86_64
+          run-id: 40976870151
+          github-token: ${{ github.token }}
+          path: intel-input
+      - name: Download and verify official Nextcloud ARM64 resources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download v9.3.6 --repo nextcloud-releases/Office-DesktopEditors \
+            --pattern Nextcloud-Office-DesktopEditors-9.3.6-0-macos-arm64.dmg
+          echo '0bb5ca56177d949a743b3643f29cd8e444f7239042af35381151861ab9485cdc  Nextcloud-Office-DesktopEditors-9.3.6-0-macos-arm64.dmg' | shasum -a 256 -c -
+      - name: Adapt resources and verify Intel bundle
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          # Use the DMG, which retains executable modes and framework symlinks.
+          INTEL_DMG="$(find intel-input -name '*.dmg' -type f)"
+          test -f "$INTEL_DMG"
+          find intel-input -type d -name 'Euro-Office.app' -prune -exec rm -rf {} +
+          mkdir -p "$RUNNER_TEMP/intel-mount" "$RUNNER_TEMP/nextcloud-mount" dmg-root out
+          trap 'hdiutil detach "$RUNNER_TEMP/nextcloud-mount"; hdiutil detach "$RUNNER_TEMP/intel-mount"' EXIT
+          hdiutil attach "$INTEL_DMG" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/intel-mount"
+          hdiutil attach Nextcloud-Office-DesktopEditors-9.3.6-0-macos-arm64.dmg \
+            -readonly -nobrowse -mountpoint "$RUNNER_TEMP/nextcloud-mount"
+          APP='dmg-root/Nextcloud Office.app'
+          ditto "$RUNNER_TEMP/intel-mount/Euro-Office.app" "$APP"
+          python3 build/nextcloud-intel/adapt-resources.py \
+            "$RUNNER_TEMP/nextcloud-mount/Nextcloud Office.app" "$APP"
+          lipo -verify_arch x86_64 "$APP/Contents/MacOS/Euro-Office"
+          # Only resources changed. Preserve the existing nested code signatures
+          # and re-sign the outer bundle with its original entitlements/flags.
+          codesign --force --sign - --timestamp=none \
+            --identifier local.leinadsoft.nextcloud-office-intel \
+            --preserve-metadata=entitlements,flags "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname 'Nextcloud Office Intel (unofficial)' \
+            -srcfolder dmg-root -format UDZO \
+            out/Nextcloud-Office-DesktopEditors-9.3.6-intel.1-macos-x86_64.dmg
+          hdiutil verify out/Nextcloud-Office-DesktopEditors-9.3.6-intel.1-macos-x86_64.dmg
+          shasum -a 256 out/*.dmg > out/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextcloud-office-intel-x86_64-unofficial
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
